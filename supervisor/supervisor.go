@@ -14,8 +14,10 @@ import (
 )
 
 type (
+	EventCode int
+
 	Event struct {
-		Code    int
+		Code    EventCode
 		Message string
 		Time    time.Time
 	}
@@ -59,6 +61,27 @@ type (
 
 		DelayBetweenSpawns func(currentSleep int) (sleep int) // in seconds
 	}
+)
+
+const (
+	OpenEvent           = EventCode(0)  // open file
+	ReadErrorEvent      = EventCode(1)  // can't read from file
+	InterruptEvent      = EventCode(3)  // sending interrupt
+	KillEvent           = EventCode(4)  // kill process
+	RestartEvent        = EventCode(5)  // restart instance
+	GoroutineDoneEvent  = EventCode(5)  // goroutine done
+	GoroutineWaitEvent  = EventCode(6)  // waiting for goroutines
+	CrashedEvent        = EventCode(7)  // instance crashed
+	StartEvent          = EventCode(8)  // start instance
+	NoStartEvent        = EventCode(9)  // instance failed to start
+	WillSleepEvent      = EventCode(10) // instance going to sleep
+	WatchDaemonOffEvent = EventCode(11) // watch daemon off
+	MaxSpawnEvent       = EventCode(13) // reached max spawns
+	GoroutineAliveEvent = EventCode(15) // some goroutines are still alive
+	CloseEvent          = EventCode(19) // close file event
+	ReadyEvent          = EventCode(22) // instance ready
+	SleepingEvent       = EventCode(29) // instance sleeping
+	WillKillEvent       = EventCode(20) // going to kill instance
 )
 
 // public
@@ -217,7 +240,7 @@ func (p *Process) start() error {
 	go p.handleOut("stdout", stdout, p.Stdout, p.options.StdoutIdleTime)
 	go p.handleOut("stderr", stderr, p.Stderr, p.options.StderrIdleTime)
 
-	p.event(8, "starting instance...")
+	p.event(StartEvent, "starting instance...")
 	err = p.cmd.Start()
 	if err != nil {
 		return err
@@ -225,7 +248,7 @@ func (p *Process) start() error {
 
 	p.pid = p.cmd.Process.Pid
 
-	p.event(22, "instance ready...")
+	p.event(ReadyEvent, "instance ready...")
 
 	return nil
 }
@@ -242,10 +265,10 @@ func (p *Process) watch() {
 			break
 		}
 
-		p.event(7, "instance crashed...")
+		p.event(CrashedEvent, "instance crashed...")
 
 		if numSpawns >= p.options.MaxSpawns {
-			p.event(13, "reached max spawns...")
+			p.event(MaxSpawnEvent, "reached max spawns...")
 			p.Stop() // cleanup
 			break
 		} else {
@@ -260,14 +283,14 @@ func (p *Process) watch() {
 			currentSleep = p.options.DelayBetweenSpawns(currentSleep)
 		}
 		if attempt > p.options.SpawnAttempts {
-			p.event(9, "giving up, instance failed to start...")
+			p.event(NoStartEvent, "giving up, instance failed to start...")
 			p.Stop() // shutting down instance and send done notification...
 			break
 		}
 
-		p.event(10, "going to sleep for %d seconds...", currentSleep)
+		p.event(WillSleepEvent, "going to sleep for %d seconds...", currentSleep)
 		p.stop() // cleanup
-		p.event(29, "entering sleep stage...")
+		p.event(SleepingEvent, "entering sleep stage...")
 
 		milliseconds := currentSleep * 1000
 		waited := 0
@@ -281,7 +304,7 @@ func (p *Process) watch() {
 
 		p.start()
 	}
-	p.event(11, "watch daemon is off...")
+	p.event(WatchDaemonOffEvent, "watch daemon is off...")
 }
 
 func (p *Process) Restart() {
@@ -298,18 +321,18 @@ func (p *Process) stop() {
 
 	defer p.isStopped(true)
 
-	p.event(20, "going to kill process..")
+	p.event(WillKillEvent, "going to kill process..")
 
 	attempts := 0
 
 	for p.Running() && p.cmd != nil && p.cmd.Process != nil {
 		attempts++
 		if attempts < p.options.AttemptsBeforeTerminate {
-			p.event(3, "sending interrupt to process - attempt %d", attempts)
+			p.event(InterruptEvent, "sending interrupt to process - attempt %d", attempts)
 			p.cmd.Process.Signal(os.Interrupt)
 			time.Sleep(time.Second)
 		} else {
-			p.event(4, "refuse to quit, kill it (pid %d)...", p.cmd.Process.Pid)
+			p.event(KillEvent, "refuse to quit, kill it (pid %d)...", p.cmd.Process.Pid)
 			p.cmd.Process.Kill()
 			p.cmd.Process.Signal(os.Kill)
 			p.isKilled(true)
@@ -324,15 +347,15 @@ func (p *Process) stop() {
 		select {
 		case who := <-p.done:
 			i++
-			p.event(5, "%s goroutine is done...", who)
+			p.event(GoroutineDoneEvent, "%s goroutine is done...", who)
 			if i >= 3 {
 				return
 			}
 		case <-time.After(time.Second):
-			p.event(6, "waiting for goroutines to quit...")
+			p.event(GoroutineWaitEvent, "waiting for goroutines to quit...")
 			t++
 			if t > 5 {
-				p.event(14, "waited too long exiting... some goroutines are still alive...")
+				p.event(GoroutineAliveEvent, "waited too long exiting... some goroutines are still alive...")
 				return
 			}
 		}
@@ -342,7 +365,7 @@ func (p *Process) stop() {
 
 // runs in its own goroutine
 func (p *Process) handleIn(in io.WriteCloser, channel chan *[]byte) {
-	p.event(0, "opening stdin handler...")
+	p.event(OpenEvent, "opening stdin handler...")
 Loop:
 	for {
 		select {
@@ -352,7 +375,7 @@ Loop:
 				_, _ = buff.WriteString("\n")
 				_, err := in.Write(buff.Bytes())
 				if err != nil {
-					p.event(0, "can't write STDIN %s", err)
+					p.event(OpenEvent, "can't write STDIN %s", err)
 					p.done <- "stdin"
 					break Loop
 				}
@@ -363,7 +386,7 @@ Loop:
 			break Loop
 		}
 	}
-	p.event(19, "closing stdin handler...")
+	p.event(CloseEvent, "closing stdin handler...")
 }
 
 func (p *Process) getHeartbeater(name string, seconds int) chan bool {
@@ -377,7 +400,7 @@ func (p *Process) getHeartbeater(name string, seconds int) chan bool {
 					return
 				}
 			case <-time.After(time.Second * time.Duration(seconds)):
-				p.event(15, "%s - reached timeout, restarting instance...", name)
+				p.event(RestartEvent, "%s - reached timeout, restarting instance...", name)
 				p.stop()
 				return
 			}
@@ -389,7 +412,7 @@ func (p *Process) getHeartbeater(name string, seconds int) chan bool {
 
 // runs in its own goroutine
 func (p *Process) handleOut(name string, out *bufio.Reader, channel chan *[]byte, heartbeat int) {
-	p.event(0, "opening %v handler...", name)
+	p.event(OpenEvent, "opening %v handler...", name)
 	var heartbeatChannel chan bool
 	shouldHeartbeat := heartbeat > 0
 
@@ -407,7 +430,7 @@ func (p *Process) handleOut(name string, out *bufio.Reader, channel chan *[]byte
 		beat(true)
 
 		if err != nil {
-			p.event(1, "can't read from %s: %s", name, err)
+			p.event(ReadErrorEvent, "can't read from %s: %s", name, err)
 			break
 		}
 		channel <- &line
@@ -417,7 +440,7 @@ func (p *Process) handleOut(name string, out *bufio.Reader, channel chan *[]byte
 	p.done <- name
 }
 
-func (p *Process) event(code int, message string, format ...interface{}) {
+func (p *Process) event(code EventCode, message string, format ...interface{}) {
 	msg := &Event{
 		Message: fmt.Sprintf(("[%s] " + message), append([]interface{}{p.options.Id}, format...)...),
 		Time:    time.Now(),
